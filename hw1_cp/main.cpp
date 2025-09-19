@@ -54,7 +54,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (argc - optind == 2) {
+    if (argc - optind <= 1) {
+        printHelpMsg();
+        return 0;
+    } else if (argc - optind == 2) {
         CpContext_t context = {argv[optind], argv[optind+1], NULL};
         CpErr cp_code = copyFile(&context, &flags);
         if (parseCpErr(&context, cp_code, &flags) == CP_FATAL)
