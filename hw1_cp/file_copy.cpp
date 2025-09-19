@@ -183,13 +183,13 @@ CpErr copyFile(CpContext_t *context, const struct copy_flags *flags) {
 int parseCpErr(const CpContext_t *context, const CpErr cp_code, const struct copy_flags *flags) {
     assert(context); assert(flags);
     const char *src = context->src,
-               *dst = context->dst;
+               *dst = context->dst_path;
     assert(src); assert(dst);
 
     switch (cp_code.code) {
         case CP_ERROR::SUCCESS:
             if (flags->verbose) {
-                printf("Copied '%s' to '%s'\n", src, dst);
+                printf("'%s' -> '%s'\n", src, dst);
             }
             break;
         case CP_ERROR::SRC_STAT:
