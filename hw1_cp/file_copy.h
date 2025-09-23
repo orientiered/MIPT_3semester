@@ -25,6 +25,7 @@ enum class CP_ERROR {
     SRC_OPEN,
     DST_NOT_DIR,
     DST_REWRITE,
+    DIR_REWRITE, // final destination path is directory
     DST_OPEN,
     SRC_READ,
     DST_WRITE,

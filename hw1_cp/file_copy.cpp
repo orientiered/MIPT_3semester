@@ -113,6 +113,7 @@ CpErr copyFile(CpContext_t *context, const struct copy_flags *flags) {
     const char *src = context->src,
                *dst = context->dst;
     assert(src); assert(dst);
+    context->dst_path = dst;
 
     struct stat src_info = {};
     if (stat(src, &src_info) < 0) {
@@ -125,18 +126,9 @@ CpErr copyFile(CpContext_t *context, const struct copy_flags *flags) {
 
     struct stat dst_info = {};
     bool dst_is_dir = false;
-    bool dst_exists = false;
+    bool allow_rewrite = flags->rewrite_existing;
     if (stat(dst, &dst_info) == 0) {
-        switch(getFileType(&dst_info)) {
-            case FileType::DIR:
-                dst_is_dir = true;
-                break;
-            case FileType::REGULAR:
-                dst_exists = true;
-                break;
-            default:
-                break;
-        }
+        dst_is_dir = getFileType(&dst_info) == FileType::DIR;
     }
 
     if (flags->only_dir_dst && !dst_is_dir) {
@@ -147,22 +139,34 @@ CpErr copyFile(CpContext_t *context, const struct copy_flags *flags) {
     context->dst_path = dst_path;
 
     struct stat real_dst_info = {};
-    if (stat(dst_path, &real_dst_info) == 0 && getFileType(&real_dst_info) == FileType::REGULAR) {
-        if (!flags->rewrite_existing) {
+    if (stat(dst_path, &real_dst_info) == 0) {
+        // file exists
+        if (getFileType(&real_dst_info) == FileType::DIR) {
+            // example: cp hello  a
+            //              file dir
+            // a/hello is directory -> error
+            return {CP_ERROR::DIR_REWRITE, 0};
+        }
+
+        if (!allow_rewrite) {
             if (!flags->interactive) {
                 return {CP_ERROR::DST_REWRITE, 0};
             } else if (!getUserChoice(dst_path)) {
                 return {CP_ERROR::USR_CANCEL, 0};
+            } else {
+                allow_rewrite = true;
             }
         }
     }
+
     int src_fd = open(src, O_RDONLY);
     if (src_fd < 0) {
         return {CP_ERROR::SRC_OPEN, errno};
     }
 
 
-    int open_flags = O_WRONLY | O_CREAT | O_TRUNC;
+    int open_flags = (allow_rewrite) ? O_WRONLY | O_CREAT | O_TRUNC :
+                                       O_WRONLY | O_CREAT | O_EXCL;
 
     int dst_fd = open(dst_path, open_flags, src_info.st_mode);
     if (dst_fd < 0) {
@@ -173,9 +177,11 @@ CpErr copyFile(CpContext_t *context, const struct copy_flags *flags) {
     if (copy_status.code != CP_ERROR::SUCCESS) return copy_status;
 
     int dst_close = close(dst_fd);
-    if (dst_close < 0) return {CP_ERROR::DST_CLOSE, errno};
+    int dst_close_errno = errno;
     int src_close = close(src_fd);
-    if (src_close < 0) return {CP_ERROR::SRC_CLOSE, errno};
+    int src_close_errno = errno;
+    if (dst_close < 0) return {CP_ERROR::DST_CLOSE, dst_close_errno};
+    if (src_close < 0) return {CP_ERROR::SRC_CLOSE, src_close_errno};
 
     return {CP_ERROR::SUCCESS, 0};
 }
@@ -204,9 +210,11 @@ int parseCpErr(const CpContext_t *context, const CpErr cp_code, const struct cop
         case CP_ERROR::DST_NOT_DIR:
             ERRPRINTF("Is not directory:'%s'\n", dst);
             return CP_FATAL;
-        case CP_ERROR::DST_REWRITE:
-            // if (flags->verbose)
-            printf("Already exists: '%s'\n", context->dst_path);
+        case CP_ERROR::DIR_REWRITE:
+            ERRPRINTF("Cannot overwrite directory '%s' \n", dst);
+            break;
+        case CP_ERROR::DST_REWRITE: // copying file to directory and dst/file_name is directory too
+            printf("Already exists: '%s'\n", dst);
             break;
         case CP_ERROR::DST_OPEN:
             ERRPRINTF("Can't open '%s':%s\n", dst, strerror(cp_code.cp_errno));
