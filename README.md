@@ -9,3 +9,4 @@
 1. [Введение](sem1)
 2. [Fork](sem2)
 3. [Read/Write syscalls, cat program](sem3)
+4. [Pipe, pipe example with cat program, wc program](sem4)
