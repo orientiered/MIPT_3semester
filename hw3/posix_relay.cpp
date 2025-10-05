@@ -5,8 +5,6 @@
 #include <mqueue.h>
 #include <assert.h>
 
-// #include <sys/ipc.h>
-// #include <sys/msg.h>
 #include <sys/wait.h>
 
 struct relay_msg {
