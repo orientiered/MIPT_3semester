@@ -9,7 +9,7 @@
 
     Сборка: `mkdir build && make`
 
-3. [POSIX IPC](hw3) - (**ЧЕРНОВИК**) демонстрация работы POSIX message queue
+3. [POSIX IPC](hw3) - демонстрация работы POSIX message queue
 
 ## Семинары
 1. [Введение](sem1)
