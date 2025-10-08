@@ -11,9 +11,12 @@
 
 3. [POSIX IPC](hw3) - демонстрация работы POSIX message queue
 
+4. [Priority shower](hw4) - симуляция сломанного душа в общежитии с динамическим приоритетом пола на семафорах Sys V.
+
 ## Семинары
 1. [Введение](sem1)
 2. [Fork](sem2)
 3. [Read/Write syscalls, cat program](sem3)
 4. [Pipe, pipe example with cat program, wc program](sem4)
 5. [Sys V IPC](sem5)
+6. [Sys V Semaphore](sem6)
