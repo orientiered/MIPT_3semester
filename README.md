@@ -13,6 +13,8 @@
 
 4. [Priority shower](hw4) - симуляция сломанного душа в общежитии с динамическим приоритетом пола на семафорах Sys V.
 
+5. [Producer/consumer](hw5) - несколько производителей и потребителей
+
 ## Семинары
 1. [Введение](sem1)
 2. [Fork](sem2)
@@ -20,3 +22,4 @@
 4. [Pipe, pipe example with cat program, wc program](sem4)
 5. [Sys V IPC](sem5)
 6. [Sys V Semaphore](sem6)
+7. [Posix shmem](sem7)
