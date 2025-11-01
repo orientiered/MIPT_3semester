@@ -1,5 +1,5 @@
-#include "sysv_sem.hpp"
-#include "utils.hpp"
+#include "../sysv_sem.hpp"
+#include "../utils.hpp"
 
 struct context {
     int sem_details;

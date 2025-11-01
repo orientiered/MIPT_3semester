@@ -1,4 +1,4 @@
-#include "sysv_sem.hpp"
+#include "../sysv_sem.hpp"
 
 struct context {
     int sem_details;
