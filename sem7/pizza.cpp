@@ -10,9 +10,9 @@
 #include <semaphore.h>
 #include <string.h>
 
-const char * const PIZZA  = "pizza!";
+const char * const PIZZA_str  = "pizza!";
 const char * const CLOSED = "closed";
-const size_t pizza_len = strlen(PIZZA) + 1;
+const size_t pizza_len = strlen(PIZZA_str) + 1;
 
 struct context {
     sem_t *ready;
@@ -74,7 +74,7 @@ void producer [[noreturn]] (volatile context ctx, int N) {
             put_idx = circular_inc(ctx.sh_put, N);
         )
 
-        strcpy(ctx.sh_tables + put_idx*pizza_len, PIZZA);
+        strcpy(ctx.sh_tables + put_idx*pizza_len, PIZZA_str);
         fprintf(stderr, "%d:Cooked pizza at table %d\n", getpid()%100, put_idx);
 
         sem_post(ctx.ready);
@@ -97,7 +97,7 @@ void client [[noreturn]] (volatile context ctx, int N) {
             get_idx = circular_inc(ctx.sh_get, N);
         )
 
-        if (strcmp(ctx.sh_tables + get_idx*pizza_len, PIZZA) == 0) {
+        if (strcmp(ctx.sh_tables + get_idx*pizza_len, PIZZA_str) == 0) {
             fprintf(stderr, "\t\t\t\t\t\t%d:Ate pizza at table %d\n", getpid()%100, get_idx);
         } else {
             fprintf(stderr, "\t\t\t\t\t\t%d:This is not a pizza %d\n", getpid()%100, get_idx);

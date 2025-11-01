@@ -10,9 +10,11 @@
 #include <semaphore.h>
 #include <string.h>
 
-const char * const PIZZA  = "pizza!";
-const char * const CLOSED = "closed";
-const size_t pizza_len = strlen(PIZZA) + 1;
+#include "../shared_mem.hpp"
+
+const char * const PIZZA_str  = "pizza!";
+// const char * const CLOSED = "closed";
+const size_t pizza_len = strlen(PIZZA_str) + 1;
 
 struct context {
     sem_t *ready;
@@ -20,100 +22,168 @@ struct context {
 
     sem_t *mutex;
 
+    int N;
     char *sh_tables;
-    int  *sh_put;
-    int  *sh_get;
+    int  *sh_usage;
     int  *continue_work;
 };
+
+enum TABLE_TYPE {
+    EMPTY = 0,
+    CHIEF,
+    CLIENT,
+    PIZZA
+};
+
+const char * const str_table_type[] = {
+    "EMPTY",
+    "CHIEF",
+    "CLIENT",
+    "PIZZA"
+};
+void log_tables(context ctx) {
+    for (int i = 0; i < ctx.N; i++) {
+        LOG("%d:%s ", i, str_table_type[ctx.sh_usage[i]] );
+    }
+
+    LOG("\n");
+}
+
+// #define LOG_TABLES
+
+#ifdef LOG_TABLES
+# define SHOW_TABLES(ctx) log_tables(ctx)
+#else
+# define SHOW_TABLES(ctx)
+#endif
 
 /*
 sem ready = 0
 sem empty = N
 
-sem mutex
-shared put = 0
-shared get = 0
-shared continue_work = 1
+sem mutex = 1
+shared char tables[N][strlen(pizza)];
+shared int  table_usage[N];
+shared int  continue_work = 1
+
+define mutex{...} wait(mutex) ... post(mutex)
+
 chief:
     wait(empty)
 
-    wait(mutex)
-    my_put = put;
-    put++; put %= N;
-    post(mutex)
+  mutex{
+    idx = find_empty(table_usage);
+    table_usage[idx] = chief
+  }
 
-    cook(my_put)
+    cook(idx)
 
+  mutex{
+    table_usage[idx] = pizza
     post(ready)
+  }
+
 client:
     wait(ready)
 
-    wait(mutex)
-    my_get = get;
-    get++; get %= N;
-    post(mutex)
+  mutex{
+    idx = find_ready(table_usage);
+    table_usage[idx] = client
+  }
 
-    check(my_get)
+    check(idx)
 
+  mutex{
+    table_usage[idx] = empty
     post(empty)
+  }
 
 */
 
-int circular_inc(int *val, int N) {
-    int current = *val;
-    *val = (current + 1) % N;
-    return current;
+
+void work() {
+    int work_time = rand() % 10 * 1e5;
+    usleep(work_time);
+}
+
+int find_table(const int* tables, int N, int type) {
+    for (int i = 0; i < N; i++) {
+        if (tables[i] == type) return i;
+    }
+
+    LOG("!!!Table search failed\n");
+    return -1;
 }
 
 #define MUTEX(...) do {sem_wait(ctx.mutex); __VA_ARGS__ sem_post(ctx.mutex); } while(0);
-void producer [[noreturn]] (volatile context ctx, int N) {
+void producer [[noreturn]] (context ctx) {
     while (true) {
         int put_idx = 0;
-        sem_wait(ctx.empty);
+        if (!*ctx.continue_work) break;
+        if (sem_wait(ctx.empty) < 0) break;
         MUTEX(
-            put_idx = circular_inc(ctx.sh_put, N);
+            put_idx = find_table(ctx.sh_usage, ctx.N, EMPTY);
+            ctx.sh_usage[put_idx] = CHIEF;
+            SHOW_TABLES(ctx);
         )
 
-        strcpy(ctx.sh_tables + put_idx*pizza_len, PIZZA);
-        fprintf(stderr, "%d:Cooked pizza at table %d\n", getpid()%100, put_idx);
+        work();
+        strcpy(ctx.sh_tables + put_idx*pizza_len, PIZZA_str);
 
-        sem_post(ctx.ready);
-        bool continue_work = true;
-        MUTEX(continue_work = *ctx.continue_work;)
-        if (!continue_work) break;
+        MUTEX(
+            ctx.sh_usage[put_idx] = PIZZA;
+            SHOW_TABLES(ctx);
+            if (sem_post(ctx.ready) < 0) {
+                sem_post(ctx.mutex);
+                break;
+            }
+        )
+
+        PROC_LOG("Cooked pizza at table %d\n", put_idx);
         // usleep(5000);
     }
 
-    fprintf(stderr, "%d:Finished work\n", getpid()%100);
+    PROC_LOG("Chief: finished work\n");
 
     exit(0);
 }
 
-void client [[noreturn]] (volatile context ctx, int N) {
+void client [[noreturn]] (context ctx) {
     while (true) {
         int get_idx = 0;
-        sem_wait(ctx.ready);
+        if (!*ctx.continue_work) break;
+        if (sem_wait(ctx.ready) < 0) break;
         MUTEX(
-            get_idx = circular_inc(ctx.sh_get, N);
+            get_idx = find_table(ctx.sh_usage, ctx.N, PIZZA);
+            ctx.sh_usage[get_idx] = CLIENT;
+            SHOW_TABLES(ctx);
         )
 
-        if (strcmp(ctx.sh_tables + get_idx*pizza_len, PIZZA) == 0) {
-            fprintf(stderr, "\t\t\t\t\t\t%d:Ate pizza at table %d\n", getpid()%100, get_idx);
-        } else {
-            fprintf(stderr, "\t\t\t\t\t\t%d:This is not a pizza %d\n", getpid()%100, get_idx);
-        }
-        sem_post(ctx.empty);
+        work();
+        bool check = strcmp(ctx.sh_tables + get_idx*pizza_len, PIZZA_str) == 0;
 
-            bool continue_work = true;
-        MUTEX(continue_work = *ctx.continue_work;)
-        if (!continue_work) break;
+        MUTEX(
+            ctx.sh_usage[get_idx] = EMPTY;
+            SHOW_TABLES(ctx);
+
+            if (sem_post(ctx.empty) < 0) {
+                sem_post(ctx.mutex);
+                break;
+            }
+        )
+
+        if (check) {
+            PROC_LOG("\t\t:Ate pizza at table %d\n", get_idx);
+        } else {
+            PROC_LOG("\t\t:This is not a pizza %d\n", get_idx);
+        }
         // usleep(5000);
     }
 
+    PROC_LOG("Client: finished work\n");
+
     exit(0);
 }
-
-#define CHECK(expr, msg) if ((long long)(expr) < 0) {perror(msg); exit(EXIT_FAILURE); }
 
 sem_t *Create_sem(const char *name, int value) {
     sem_t *sem = sem_open(name, O_CREAT, 0666, value);
@@ -140,55 +210,41 @@ int main(int argc, const char *argv[]) {
         sscanf(argv[3], "%d", &consumers);
     }
 
-    int shm_fd = shm_open(SHM_NAME, O_RDWR | O_CREAT, 0666);
-    CHECK(shm_fd, "shm error");
-    size_t full_size = pizza_len * N + 3*sizeof(int);
-    CHECK(ftruncate(shm_fd, pizza_len), "truncate err");
-    char *sh_mem = (char*) mmap(NULL, full_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    CHECK(sh_mem, "mmap");
+    size_t full_size = pizza_len * N + N*sizeof(int) + sizeof(int);
+    shmem_manager shmem(SHM_NAME, full_size);
 
     context ctx = {
+        // .ready = NULL,
         .ready = Create_sem(SEM_READY_NAME, 0),
         .empty = Create_sem(SEM_EMPTY_NAME, N),
         .mutex = Create_sem(SEM_MUTEX_NAME, 1),
-
-        .sh_tables = sh_mem + 2*sizeof(int),
-        .sh_put = (int *) sh_mem,
-        .sh_get = ((int *) sh_mem ) + 1,
-        .continue_work = ((int *) sh_mem ) + 2
+        .N = N,
+        .sh_tables = shmem.get_shared<char>(pizza_len * N),
+        .sh_usage = shmem.get_shared<int>(N),
+        .continue_work = shmem.get_shared<int>()
     };
-
     *ctx.continue_work = 1;
 
-    for (int i = 0; i < chiefs; i++) {
-        pid_t pid = fork();
-        CHECK(pid, "Fork error");
-        if (pid == 0) {
-            producer(ctx, N);
-        }
+    for (int i = 0; i < chiefs || i < consumers; i++) {
+        if (i < chiefs)
+            SPAWN(producer(ctx););
+        if (i < consumers)
+            SPAWN(client(ctx););
     }
 
-    for (int i = 0; i < chiefs; i++) {
-        pid_t pid = fork();
-        CHECK(pid, "Fork error");
-        if (pid == 0) {
-            client(ctx, N);
-        }
-    }
+    // usleep(2000);
+    sleep(10);
+    *ctx.continue_work = 0;
 
-    usleep(2000);
-    MUTEX(
-        *ctx.continue_work = 0;
-    )
+    LOG("CLOSING\nCLOSING\nCLOSING\n");
 
-    fprintf(stderr, "CLOSING\nCLOSING\nCLOSING\n");
-    pid_t closed_pid = 0;
-    while ((closed_pid = wait(NULL)) != -1) {}
-
-    CHECK(munmap(sh_mem, full_size), "unmap");
-    CHECK(shm_unlink(SHM_NAME), "unlink");
+    // closing semaphores to stop processes
+    CHECK(sem_close(ctx.empty), "sem-close");
+    CHECK(sem_close(ctx.ready), "sem-close");
     CHECK(sem_unlink(SEM_READY_NAME), "sem-unlink");
     CHECK(sem_unlink(SEM_EMPTY_NAME), "sem-unlink");
+    wait_for_all();
+
     CHECK(sem_unlink(SEM_MUTEX_NAME), "sem-unlink");
 
     return 0;
