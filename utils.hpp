@@ -27,6 +27,9 @@
 
 #define COL_RESET "\033[0m"
 #define COL_GREEN "\033[32m"
+#define COL_BLUE  "\033[34m"
+#define COL_CYAN  "\033[36m"
+#define COL_BOLD  "\033[1m"
 
 inline void wait_for_all() {
     pid_t closed_pid = 0;

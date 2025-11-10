@@ -8,19 +8,23 @@
 #include <string>
 #include <vector>
 
+#include <pwd.h>
+#include <time.h>
+#include <locale.h>
+#include <langinfo.h>
+
 #include "argvProcessor.h"
 
 const size_t MAX_PREFIX = 256;
 
 struct ls_ctx {
-    int depth = 0;
     bool recursive;
     bool dir;
     bool long_out;
     bool print_dirname;
     bool all;
-    std::string path_prefix; // must end with / or be empty
-    // char path_prefix[MAX_PREFIX];
+    bool inode;
+    bool numeric;
 };
 
 bool is_hidden(const char *name) {
@@ -52,7 +56,7 @@ int ls(ls_ctx *ctx, const std::vector<const char *>& paths);
 
 int ls_base(ls_ctx *ctx, const std::string& path, std::stack<std::string>& dirs);
 
-int ls_print(ls_ctx *ctx, struct stat& st, const char *name);
+int ls_print(ls_ctx *ctx, struct stat& st, const char *name, const char *path);
 
 int ls_base(ls_ctx *ctx, const std::string& path, std::stack<std::string>& dirs) {
     struct stat st = {};
@@ -65,7 +69,7 @@ int ls_base(ls_ctx *ctx, const std::string& path, std::stack<std::string>& dirs)
     }
 
     if (get_file_type(st.st_mode) != 'd') {
-        return ls_print(ctx, st, path.c_str());
+        return ls_print(ctx, st, path.c_str(), path.c_str());
     }
 
     DIR *dir = opendir(path.c_str());
@@ -84,7 +88,7 @@ int ls_base(ls_ctx *ctx, const std::string& path, std::stack<std::string>& dirs)
                 dirs.push(new_path);
                 // LOG("Pushed path: %s\n", new_path.c_str());
             }
-            ls_print(ctx, st, name);
+            ls_print(ctx, st, name, new_path.c_str());
         }
     }
 
@@ -99,25 +103,70 @@ int ls(ls_ctx *ctx, const std::vector<const char *>& paths) {
         dirs.push(std::string(paths[i]));
     }
 
-    while (!dirs.empty()) {
-        const std::string path = dirs.top();
-        dirs.pop();
-        printf("\n");
-        ls_base(ctx, path, dirs);
+    bool first_dir = true;
 
+    while (!dirs.empty()) {
+        const std::string path = std::move(dirs.top());
+        dirs.pop();
+
+        if (!first_dir)
+            printf("\n");
+
+        ls_base(ctx, path, dirs);
+        first_dir = false;
     }
 
     return 0;
 }
 
 
-int ls_print(ls_ctx *ctx, struct stat& st, const char *name) {
-    if (ctx->long_out) {
-        printf("%c %o %ld %s\n", get_file_type(st.st_mode), st.st_mode & 0777, st.st_size, name);
-    } else {
-        printf("\t%s\n", name);
+int ls_print(ls_ctx *ctx, struct stat& st, const char *name, const char *path) {
+    if (ctx->inode) {
+        printf("%lu ", st.st_ino);
     }
 
+    char file_type = get_file_type(st.st_mode);
+    if (ctx->long_out) {
+        printf("%c %o %lu ", file_type, st.st_mode & 0777, st.st_nlink);
+
+        // %8ld
+        int uid = st.st_uid;
+        struct passwd* uid_passwd = getpwuid(uid);
+        int gid = st.st_gid;
+        struct passwd* gid_passwd = getpwuid(gid);
+
+        if (ctx->numeric) {
+            printf("%d %d ", uid, gid);
+        } else {
+            printf("%s %s ", uid_passwd->pw_name, gid_passwd->pw_name);
+        }
+
+        char datestring[256];
+        struct tm *tm = localtime(&st.st_mtime);
+        strftime(datestring, 256, nl_langinfo(D_T_FMT), tm);
+
+        printf("%8ld %s ", st.st_size, datestring);
+        // if (
+    } else {
+        printf("\t");
+    }
+
+    const char *start_seq = "";
+    const char *end_seq = COL_RESET;
+    if (st.st_mode & 0100) start_seq = COL_BOLD COL_GREEN;
+    if (file_type == 'd') start_seq = COL_BOLD COL_BLUE;
+    if (file_type == 'l') start_seq = COL_BOLD COL_CYAN;
+
+    printf("%s%s%s", start_seq, name, end_seq);
+    if (file_type == 'l') {
+        char buffer[1024];
+        int link_bytes = readlink(path, buffer, 1024);
+        buffer[link_bytes] = '\0';
+
+        printf(" -> %s", buffer);
+    }
+
+    printf("\n");
     return 0;
 }
 
@@ -127,30 +176,35 @@ int main(int argc, const char *argv[]) {
     registerFlag(TYPE_BLANK, "-a", "--all", "Show hidden files");
     registerFlag(TYPE_BLANK, "-l", "--long", "Show more info about file");
     registerFlag(TYPE_BLANK, "-R", "--recursive", "Show files recursively");
+    registerFlag(TYPE_BLANK, "-i", "--inode", "Show index node");
+    registerFlag(TYPE_BLANK, "-n", "--numeric", "Show user id and group id instead of name");
+    registerFlag(TYPE_BLANK, "-d", "--directory", "List directories themselves, not their contents");
 
     enableHelpFlag("Usage: ./myls.exe [flags] [path1 path2 ...]");
 
     processArgs(argc, argv);
 
     ls_ctx ctx = {};
-    if (isFlagSet("-a")) ctx.all = true;
-    if (isFlagSet("-l")) ctx.long_out = true;
-    if (isFlagSet("-R")) ctx.recursive = true;
+    ctx.all         = isFlagSet("-a");
+    ctx.long_out    = isFlagSet("-l");
+    ctx.recursive   = isFlagSet("-R");
+    ctx.dir         = isFlagSet("-d");
+    ctx.inode       = isFlagSet("-i");
+    ctx.numeric     = isFlagSet("-n");
 
     int total_paths = 0;
     while (getDefaultArgument(total_paths) != NULL) total_paths++;
 
-    ctx.print_dirname = true;
     std::vector<const char *> paths;
     if (total_paths == 0) {
         paths = {"."};
-    } else if (total_paths == 1) {
-        paths = {getDefaultArgument(0)};
     } else {
         for (int i = 0; i < total_paths; i++) {
             paths.push_back(getDefaultArgument(i));
         }
     }
+
+    ctx.print_dirname = (ctx.recursive || paths.size() > 1);
 
     ls(&ctx, paths);
 
