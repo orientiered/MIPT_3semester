@@ -15,8 +15,6 @@
 
 #include "argvProcessor.h"
 
-const size_t MAX_PREFIX = 256;
-
 struct ls_ctx {
     bool recursive;
     bool dir;
@@ -122,7 +120,7 @@ int ls(ls_ctx *ctx, const std::vector<const char *>& paths) {
 
 int ls_print(ls_ctx *ctx, struct stat& st, const char *name, const char *path) {
     if (ctx->inode) {
-        printf("%lu ", st.st_ino);
+        printf("%6lu ", st.st_ino);
     }
 
     char file_type = get_file_type(st.st_mode);

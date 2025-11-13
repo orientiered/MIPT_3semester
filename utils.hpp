@@ -17,8 +17,14 @@
 
 #define CHECK(expr, msg) if ((long long)(expr) < 0) {perror(msg); exit(EXIT_FAILURE); }
 #define SOFT_CHECK(expr, msg) if ((long long)(expr) < 0) {perror(msg); }
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
-#define PROC_LOG(fmt, ...) LOG("| %d | " fmt, getpid() % 100 ,##__VA_ARGS__)
+
+#ifndef NO_LOGGING
+# define LOG(...) fprintf(stderr, __VA_ARGS__)
+# define PROC_LOG(fmt, ...) LOG("| %d | " fmt, getpid() % 100 ,##__VA_ARGS__)
+#else
+# define LOG(...)
+# define PROC_LOG(fmt, ...)
+#endif
 
 // void test() {
 //     PROC_LOG("hello %s %d", "world", 5);
