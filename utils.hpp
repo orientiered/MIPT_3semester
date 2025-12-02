@@ -82,3 +82,7 @@ inline void Close(int fd) {
     int code = close(fd);
     SOFT_CHECK(code, "Close error");
 }
+
+const int STDOUT_FD = 1;
+const int STDIN_FD = 0;
+const int STDERR_FD = 2;

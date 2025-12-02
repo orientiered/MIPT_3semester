@@ -4,6 +4,7 @@
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/sem.h>
 
 const size_t MAX_USERS = 256;
 
@@ -14,15 +15,17 @@ const size_t QUEUE_BLOCK_SIZE = MAX_MSG_SIZE + 20;
 const size_t MSG_QUEUE_LEN = 32;
 const size_t MSG_QUEUE_SIZE = QUEUE_BLOCK_SIZE * MSG_QUEUE_LEN;
 
-//TODO: it should work as monitor
 struct chat_info {
     pid_t users[MAX_USERS];
     size_t user_cnt = 0;
 
     char msg_queue[MSG_QUEUE_SIZE];
     int  msg_idx = 0;
+
+    int mutex_id = -1; // sys v semaphore
 };
 
+/* ========== RT SIGNAL constants and handler prototypes ========= */
 
 const int SIG_JOIN_REQUEST = SIGRTMIN;
 const int SIG_JOIN_HANDLE  = SIGRTMIN + 1;
@@ -36,20 +39,22 @@ void exit_handler(int signum);
 void msg_handler(int signum, siginfo_t *siginfo, void *);
 
 
+/* ================= Chat class =============================== */
 enum ChatStatus {
-    BAD_PID    =  2, // pid not registered in users
-    BAD_FORMAT =  1, // wrong format for /tell command
+    BAD_PID    =  2,    // pid not registered in users
+    BAD_FORMAT =  1,    // wrong format for /tell command
     SUCCESS    =  0,
-    CHAT_ERR   = -1,
-    SCANF_FAIL = -2,
-    QUIT_CMD   = -3,
-    USER_OVERFLOW = -4
+    CHAT_ERR   = -1,    // General error
+    SCANF_FAIL = -2,    // EOF or other scanf error
+    QUIT_CMD   = -3,    // /bye command
+    USER_OVERFLOW = -4  // User limit exceeded
 };
 
 struct chat {
     chat_info *info = nullptr;
     int my_id = -1;
     int shm_fd = -1;
+    int mtx_id = -1;
 
     char msg_buf[256] = {};
     static const size_t msg_buf_size = 255;
@@ -58,10 +63,27 @@ struct chat {
     char *line_ptr = nullptr;
     size_t line_size = 0;
 
+    /* ================== Mutex lock and unlock ==================== */
+
+    int mutex_lock() {
+        sembuf sop = {0, -1, 0};
+        //TODO: timed wait to fix mutex if process was killed with catched mutex
+        return semop(mtx_id, &sop, 1);
+    }
+
+    int mutex_unlock() {
+        sembuf sop = {0, +1, 0};
+        return semop(mtx_id, &sop, 1);
+    }
+
+    /* ================== Add and remove from users table ========== */
+
+    /// @brief Add current process to the users table
     int add_to_users() {
-        // TODO: mutex_lock
+        mutex_lock();
+
         if (info->user_cnt >= MAX_USERS) {
-            // TODO: mutex_unlock
+            mutex_unlock();
             return USER_OVERFLOW;
         }
 
@@ -71,31 +93,34 @@ struct chat {
                 my_id = i;
                 info->user_cnt++;
                 PROC_LOG("Current user count %zu\n", info->user_cnt);
-                // TODO: mutex_unlock
+                mutex_unlock();
                 return SUCCESS;
             }
         }
 
-        // TODO: mutex_unlock
+        mutex_unlock();
         return CHAT_ERR;
     }
 
+    /// @brief Remove current process from the users table
+    //! not async-safe
     int leave_from_users() {
 
         if (my_id < 0) return SUCCESS;
 
-        // TODO: mutex_lock
+
         info->users[my_id] = 0;
         info->user_cnt--;
 
         my_id = -1;
         PROC_LOG("Leave: current user count %zu\n", info->user_cnt);
 
-        // TODO: mutex_unlock
         return SUCCESS;
     }
 
-    // not async-safe
+
+    /// @brief Remove process with given pid from users table
+    //! not async-safe
     int delete_from_users(int pid) {
         PROC_LOG("Deleting user with pid %d\n", pid);
 
@@ -113,7 +138,9 @@ struct chat {
         return SUCCESS;
     }
 
+    /* ========================== Chat init function ======================= */
 
+    /// @brief Create new chat with join_pid < 0 or join to chat with process join_pid
     int join(pid_t join_pid) {
         if (join_pid < 0) {
             PROC_LOG("Creating shmem\n");
@@ -123,6 +150,12 @@ struct chat {
             info = (chat_info *) shmat(shm_fd, NULL, 0);
             CHECK(info, "Attach shm");
 
+            info->mutex_id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0666);
+            sembuf sops = {.sem_num = 0, .sem_op = 1, .sem_flg = 0};
+            CHECK(info->mutex_id, "mutex create");
+            CHECK(semop(info->mutex_id, &sops, 1), "mutex init");
+            mtx_id = info->mutex_id;
+
             add_to_users();
 
             PROC_LOG("Basic init finished\n");
@@ -131,6 +164,7 @@ struct chat {
         }
 
         PROC_LOG("Sending join request\n");
+        // TODO: check siqgueue
         sigqueue(join_pid, SIG_JOIN_REQUEST, {0});
 
         siginfo_t join_info = {};
@@ -143,6 +177,7 @@ struct chat {
         shm_fd = join_info.si_value.sival_int;
         info = (chat_info *) shmat(shm_fd, NULL, 0);
         CHECK(info, "Attach shm");
+        mtx_id = info->mutex_id;
 
         add_to_users();
 
@@ -151,7 +186,9 @@ struct chat {
         return 0;
     }
 
-    // not async-safe
+    //! not async-safe
+    /// @brief Send SIG_MSG with value msg_idx (index in msg queue) to process pid
+    /// @brief optionally check whether user with given pid exists (check_pid)s
     int send_msg(pid_t pid, int msg_idx, bool check_pid = false) {
         PROC_LOG("Formed msg: '%s'\n", &info->msg_queue[msg_idx*QUEUE_BLOCK_SIZE]);
 
@@ -170,9 +207,9 @@ struct chat {
             }
         }
 
-        // TODO: check error code and remove unexistent users
         int status = sigqueue(pid, SIG_MSG, {msg_idx});
 
+        // Deleting dead users
         if (status < 0 && errno == ESRCH) {
             delete_from_users(pid);
         } else SOFT_CHECK(status, "sigqueue");
@@ -180,7 +217,8 @@ struct chat {
         return 0;
     }
 
-    // not async-safe
+    //! not async-safe
+    /// @brief Copy string from buf to msg_queue and return it's index
     int write_msg(const char *buf) {
         int idx = info->msg_idx;
         info->msg_idx = (info->msg_idx + 1) % MSG_QUEUE_LEN;
@@ -193,25 +231,27 @@ struct chat {
         int pid = 0;
         int symbols = 0;
         if (sscanf(line_ptr, "%d %n", &pid, &symbols) < 1) {
+            fprintf(stderr, "Usage: /tell <pid> msg\n");
             return BAD_FORMAT;
         }
         line_ptr+=symbols;
 
         char buf[QUEUE_BLOCK_SIZE] = {};
-        sprintf(buf, "[%d told you]: %s\n", getpid(), line_ptr);
+        snprintf(buf, sizeof(buf), "[%d told you]: %s\n", getpid(), line_ptr);
 
-        // TODO: mutex_lock
+        mutex_lock();
         int msg_idx = write_msg(buf);
         int status = send_msg(pid, msg_idx, true);
-        // TODO: mutex_unlock
+        mutex_unlock();
+
         return status;
     }
 
     int handle_say() {
         char buf[QUEUE_BLOCK_SIZE] = {};
-        sprintf(buf, "%d: %s\n", getpid(), line_ptr);
+        snprintf(buf, sizeof(buf), "%d: %s\n", getpid(), line_ptr);
 
-        // TODO: mutex_lock
+        mutex_lock();
         int msg_idx = write_msg(buf);
         PROC_LOG("msg = '%s', msg idx = %d\n", buf, msg_idx);
 
@@ -227,7 +267,7 @@ struct chat {
             }
         }
 
-        // TODO: mutex_unlock
+        mutex_unlock();
         return status;
     }
 
@@ -255,6 +295,8 @@ struct chat {
                 return handle_tell();
             } else if (strcmp(msg_buf, "/say") == 0) {
                 return handle_say();
+            } else if (strcmp(msg_buf, "/me") == 0) {
+                printf("[Me: pid %d, id %d]\n", getpid(), my_id);
             } else {
                 printf("Unknown command\n");
                 return 0;
@@ -270,21 +312,22 @@ struct chat {
             return 0;
         }
 
-        //TODO: mutex_lock
-        // last user closes shmem
+        mutex_lock();
+        // last user closes shmem and mutex
 
         int users_left = info->user_cnt;
         leave_from_users();
         CHECK(shmdt(info), "shm detach");
         info = nullptr;
 
-        //TODO: mutex_unlock
-        //TODO: mutex delete
+        mutex_unlock();
         if (users_left == 1) {
             CHECK(shmctl(shm_fd, IPC_RMID, NULL), "shm unlink");
+            CHECK(semctl(mtx_id, 1, IPC_RMID), "mutex unlink");
         }
 
         shm_fd = -1;
+        mtx_id = -1;
 
         return 0;
     }
@@ -337,7 +380,10 @@ int main(int argc, const char *argv[]) {
 
     printf("PID: %d\n", getpid());
 
-    chat.join(join_pid);
+    if (chat.join(join_pid) < 0) {
+        fprintf(stderr, "Failed to create/connect to chat\n");
+        return EXIT_FAILURE;
+    }
 
     while (true) {
         if (chat.handle_stdin() < 0) {
