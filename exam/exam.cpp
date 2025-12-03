@@ -30,11 +30,11 @@
 
 const int CRIT_SHIPS = 3;
 
-
+#pragma region Monitor
 struct monitor {
     pthread_mutex_t mtx;
     pthread_cond_t bridge_raised, bridge_down;
-    pthread_cond_t bridge, river;
+    pthread_cond_t cross;
     std::queue<int> *cars;
     std::queue<int> *ships;
 
@@ -42,19 +42,27 @@ struct monitor {
     bool empty_bridge = true;
     bool empty_river = true;
 
+    /* ========================== Init, Destroy ========================= */
     void init() {
         mtx = PTHREAD_MUTEX_INITIALIZER;
-        bridge = PTHREAD_COND_INITIALIZER;
-        river = PTHREAD_COND_INITIALIZER;
+        cross = PTHREAD_COND_INITIALIZER;
         bridge_raised = PTHREAD_COND_INITIALIZER;
         bridge_down = PTHREAD_COND_INITIALIZER;
 
         CHECK(pthread_mutex_init(&mtx, NULL), "mtx init");
         CHECK(pthread_cond_init(&bridge_raised, NULL), "cond init");
         CHECK(pthread_cond_init(&bridge_down, NULL), "cond init");
-        CHECK(pthread_cond_init(&bridge, NULL), "cond init");
-        CHECK(pthread_cond_init(&river, NULL), "cond init");
+        CHECK(pthread_cond_init(&cross, NULL), "cond init");
     }
+
+    void destroy() {
+        CHECK(pthread_mutex_destroy(&mtx), "mtx destroy");
+        CHECK(pthread_cond_destroy(&bridge_raised), "cond destroy");
+        CHECK(pthread_cond_destroy(&bridge_down), "cond destroy");
+        CHECK(pthread_cond_destroy(&cross), "cond destroy");
+    }
+
+    /* ======================== Car ============================ */
 
     void pass_car() {
         lock();
@@ -69,7 +77,7 @@ struct monitor {
             }
 
             if (!empty_bridge) {
-                CHECK(pthread_cond_wait(&bridge, &mtx), "pthread err");
+                CHECK(pthread_cond_wait(&cross, &mtx), "pthread err");
                 // waking up only car at the front of the queue
                 if (cars->front() != pthread_self()) continue;
             }
@@ -88,10 +96,12 @@ struct monitor {
         THRD_LOG(COL_GREEN "Мост проехан\n" COL_RESET);
         cars->pop();
         empty_bridge = true;
-        CHECK(pthread_cond_broadcast(&bridge), "pthread err");
+        CHECK(pthread_cond_broadcast(&cross), "pthread err");
 
         unlock();
     }
+
+    /* ======================== Ship ============================ */
 
     void pass_ship() {
         lock();
@@ -102,7 +112,7 @@ struct monitor {
         // Для кораблей гарантируется прохождение под мостом, если он поднят
         while (!raised || !empty_bridge || !empty_river) {
             if (!empty_bridge) {
-                CHECK(pthread_cond_wait(&bridge, &mtx), "pthread err");
+                CHECK(pthread_cond_wait(&cross, &mtx), "pthread err");
             }
 
             if (!raised) {
@@ -117,14 +127,13 @@ struct monitor {
             }
 
             if (!empty_river) {
-                CHECK(pthread_cond_wait(&river, &mtx), "pthread err");
+                CHECK(pthread_cond_wait(&cross, &mtx), "pthread err");
                 // only first ship in queue wakes up
                 if (ships->front() != pthread_self()) continue;
             }
         }
 
 
-        //  Критическая секция
         empty_river = false;
         THRD_LOG(COL_BLUE "Корабль дождался очереди, проплываем под мостом\n" COL_RESET);
 
@@ -137,7 +146,6 @@ struct monitor {
         THRD_LOG(COL_GREEN "Корабль прошёл под мостом\n" COL_RESET);
         ships->pop();
         empty_river = true;
-        CHECK(pthread_cond_broadcast(&river), "pthread err");
 
         if (ships->size() == 0) {
             THRD_LOG(COL_BOLD "Все корабли проплыли, сводим мост\n" COL_RESET);
@@ -146,21 +154,14 @@ struct monitor {
             CHECK(pthread_cond_broadcast(&bridge_down), "pthread err");
         }
 
-        pthread_cond_signal(&bridge);
+        CHECK(pthread_cond_broadcast(&cross), "pthread err");
+
         unlock();
     }
 
-
-    void destroy() {
-        CHECK(pthread_mutex_destroy(&mtx), "mtx destroy");
-        CHECK(pthread_cond_destroy(&bridge_raised), "cond destroy");
-        CHECK(pthread_cond_destroy(&bridge_down), "cond destroy");
-        CHECK(pthread_cond_destroy(&river), "cond destroy");
-        CHECK(pthread_cond_destroy(&bridge), "cond destroy");
-    }
 };
 
-
+#pragma region Thread fun
 /* ======================= thread functions ================== */
 void random_sleep() {
     usleep( (rand() % 500 + 500) * 1000 );
@@ -198,6 +199,8 @@ unsigned long spawn_thread(bool type_car,void* mon) {
 
     return tid;
 }
+
+#pragma region Main
 /* ================= main =========================== */
 int main(int argc, const char *argv[]) {
 
@@ -210,7 +213,13 @@ int main(int argc, const char *argv[]) {
     // 1 = car
     // 0 = ship
     std::vector<pthread_t> tids;
-    std::vector<int> order = {1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1};
+    std::vector<int> order = {1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1};
+    for (auto type: order) {
+        tids.push_back(spawn_thread(type, &mon));
+    }
+    sleep(3);
+
+    order = {0, 0, 0, 0};
     for (auto type: order) {
         tids.push_back(spawn_thread(type, &mon));
     }
