@@ -1,6 +1,7 @@
 #include "../utils.hpp"
 
 #include <cstring>
+#include <queue>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -16,7 +17,6 @@
 
 // 5b
 
-const int MAX_ENTITIES = 16;
 
 #define MUTEX(mtx, ...) \
     pthread_mutex_lock(mtx); \
@@ -30,111 +30,123 @@ const int MAX_ENTITIES = 16;
 
 const int CRIT_SHIPS = 3;
 
+
 struct monitor {
     pthread_mutex_t mtx;
     pthread_cond_t bridge_raised, bridge_down;
-    pthread_cond_t crit;
-    // int car_queue[MAX_ENTITIES];
-    // int car_cnt = 0;
-    // int ship_queue[MAX_ENTITIES];
-    // int ship_cnt = 0;
-    std::set<int> cars;
-    std::set<int> ships;
+    pthread_cond_t bridge, river;
+    std::queue<int> *cars;
+    std::queue<int> *ships;
 
     bool raised = false;
-    bool empty = true;
+    bool empty_bridge = true;
+    bool empty_river = true;
 
     void init() {
         mtx = PTHREAD_MUTEX_INITIALIZER;
-        crit = PTHREAD_COND_INITIALIZER;
+        bridge = PTHREAD_COND_INITIALIZER;
+        river = PTHREAD_COND_INITIALIZER;
         bridge_raised = PTHREAD_COND_INITIALIZER;
         bridge_down = PTHREAD_COND_INITIALIZER;
 
         CHECK(pthread_mutex_init(&mtx, NULL), "mtx init");
         CHECK(pthread_cond_init(&bridge_raised, NULL), "cond init");
         CHECK(pthread_cond_init(&bridge_down, NULL), "cond init");
-        CHECK(pthread_cond_init(&crit, NULL), "cond init");
-    }
-
-    void random_sleep() {
-        usleep( (rand() % 500 + 500) * 1000 );
+        CHECK(pthread_cond_init(&bridge, NULL), "cond init");
+        CHECK(pthread_cond_init(&river, NULL), "cond init");
     }
 
     void pass_car() {
-        THRD_LOG("Машина подъехала к мосту\n");
         lock();
 
-        cars.insert(pthread_self());
+        THRD_LOG("Машина подъехала к мосту\n");
+        cars->push(pthread_self());
 
-        // TODO: кажется кондишн для пустой дороги не нужен, если переезд происходит под мьютексом
         // Ждём двух условий: сведенного моста и открытой дороги
-        while (raised) {
-            pthread_cond_wait(&bridge_down, &mtx);
+        while (raised || !empty_bridge) {
+            if (raised) {
+                CHECK(pthread_cond_wait(&bridge_down, &mtx), "pthread err");
+            }
 
-            while(!empty) {
-                pthread_cond_wait(&crit, &mtx);
+            if (!empty_bridge) {
+                CHECK(pthread_cond_wait(&bridge, &mtx), "pthread err");
+                // waking up only car at the front of the queue
+                if (cars->front() != pthread_self()) continue;
             }
             // учитываем, что мост могли развести сразу после того, как с него съехала машина
-
         }
 
-        empty = false;
-        THRD_LOG("Машина дождалась очереди, проезжаем по мосту\n");
+        empty_bridge = false;
+        THRD_LOG(COL_BLUE "Машина дождалась очереди, проезжаем по мосту\n" COL_RESET);
 
-        random_sleep();
+        unlock();
+    }
 
-        THRD_LOG("Мост проехан\n");
-        empty = true;
-        pthread_cond_broadcast(&crit);
+    void end_car() {
+        lock();
+
+        THRD_LOG(COL_GREEN "Мост проехан\n" COL_RESET);
+        cars->pop();
+        empty_bridge = true;
+        CHECK(pthread_cond_broadcast(&bridge), "pthread err");
 
         unlock();
     }
 
     void pass_ship() {
         lock();
-        THRD_LOG("Корабль подплыл к мосту\n");
 
-        ships.insert(pthread_self());
+        THRD_LOG("Корабль подплыл к мосту\n");
+        ships->push(pthread_self());
 
         // Для кораблей гарантируется прохождение под мостом, если он поднят
-        while (!raised) {
-            if (ships.size() < CRIT_SHIPS) {
-                pthread_cond_wait(&bridge_raised, &mtx);
-            } else {
-                // Критическая секция переезда/переплытия находится в мьютексте,
-                // поэтому на мосту гарантированно нет машин
-                THRD_LOG("Критическое кол-во кораблей: поднимаем мост\n");
-                raised = true;
-                // wake up other ships waiting at the bridge
-                pthread_cond_broadcast(&bridge_raised);
+        while (!raised || !empty_bridge || !empty_river) {
+            if (!empty_bridge) {
+                CHECK(pthread_cond_wait(&bridge, &mtx), "pthread err");
+            }
+
+            if (!raised) {
+                if (ships->size() < CRIT_SHIPS) {
+                    CHECK(pthread_cond_wait(&bridge_raised, &mtx), "pthread err");
+                } else {
+                    THRD_LOG(COL_BOLD "Критическое кол-во кораблей: поднимаем мост\n" COL_RESET);
+                    raised = true;
+                    // wake up other ships waiting at the bridge
+                    pthread_cond_broadcast(&bridge_raised);
+                }
+            }
+
+            if (!empty_river) {
+                CHECK(pthread_cond_wait(&river, &mtx), "pthread err");
+                // only first ship in queue wakes up
+                if (ships->front() != pthread_self()) continue;
             }
         }
 
 
-        while (!empty) {
-            pthread_cond_wait(&crit, &mtx);
-        }
-
         //  Критическая секция
-        empty = false;
-        THRD_LOG("Корабль дождался очереди, проплываем под мостом\n");
+        empty_river = false;
+        THRD_LOG(COL_BLUE "Корабль дождался очереди, проплываем под мостом\n" COL_RESET);
 
-        random_sleep();
+        unlock();
+    }
 
-        THRD_LOG("Корабль прошёл под мостом\n");
-        ships.erase(pthread_self());
-        empty = true;
-        pthread_cond_broadcast(&crit);
+    void end_ship() {
+        lock();
 
-        if (ships.size() == 0) {
-            THRD_LOG("Все корабли проплыли, сводим мост\n");
+        THRD_LOG(COL_GREEN "Корабль прошёл под мостом\n" COL_RESET);
+        ships->pop();
+        empty_river = true;
+        CHECK(pthread_cond_broadcast(&river), "pthread err");
+
+        if (ships->size() == 0) {
+            THRD_LOG(COL_BOLD "Все корабли проплыли, сводим мост\n" COL_RESET);
             raised = false;
             // waking up all cars waiting at the bridge
-            pthread_cond_broadcast(&bridge_down);
+            CHECK(pthread_cond_broadcast(&bridge_down), "pthread err");
         }
 
-        // Конец критической секции
-
+        pthread_cond_signal(&bridge);
         unlock();
     }
 
@@ -143,15 +155,24 @@ struct monitor {
         CHECK(pthread_mutex_destroy(&mtx), "mtx destroy");
         CHECK(pthread_cond_destroy(&bridge_raised), "cond destroy");
         CHECK(pthread_cond_destroy(&bridge_down), "cond destroy");
-        CHECK(pthread_cond_destroy(&crit), "cond destroy");
+        CHECK(pthread_cond_destroy(&river), "cond destroy");
+        CHECK(pthread_cond_destroy(&bridge), "cond destroy");
     }
 };
 
+
 /* ======================= thread functions ================== */
+void random_sleep() {
+    usleep( (rand() % 500 + 500) * 1000 );
+}
+
 void* car(void *mon_ptr) {
     monitor *mon = (monitor *) mon_ptr;
 
     mon->pass_car();
+    THRD_LOG("Едем\n");
+    random_sleep();
+    mon->end_car();
 
     return NULL;
 }
@@ -160,39 +181,45 @@ void* ship(void *mon_ptr) {
     monitor *mon = (monitor *) mon_ptr;
 
     mon->pass_ship();
+    THRD_LOG("Плывем\n");
+    random_sleep();
+    mon->end_ship();
 
     return NULL;
 }
 
+unsigned long spawn_thread(bool type_car,void* mon) {
+    pthread_t tid = 0;
+    if (type_car) {
+        CHECK(pthread_create(&tid, NULL, car, mon), "thread create");
+    } else {
+        CHECK(pthread_create(&tid, NULL, ship, mon), "thread create");
+    }
 
+    return tid;
+}
 /* ================= main =========================== */
 int main(int argc, const char *argv[]) {
 
     monitor mon;
+    std::queue<int> cars, ships;
+    mon.cars = &cars;
+    mon.ships = &ships;
     mon.init();
 
-    // spawning threads
+    // 1 = car
+    // 0 = ship
     std::vector<pthread_t> tids;
-    for (int i = 0; i < 10; i++) {
-        pthread_t tid = 0;
-        CHECK(pthread_create(&tid, NULL, car, &mon), "thread create");
-        tids.push_back(tid);
-        // CHECK(pthread_detach(tid), "detach err");
-    }
-
-    for (int i = 0; i < 10; i++) {
-        pthread_t tid = 0;
-        CHECK(pthread_create(&tid, NULL, ship, &mon), "thread create");
-        tids.push_back(tid);
-        // CHECK(pthread_detach(tid), "detach err");
+    std::vector<int> order = {1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1};
+    for (auto type: order) {
+        tids.push_back(spawn_thread(type, &mon));
     }
 
     LOG("All threads spawned\n");
 
-    for (auto tid: tids) {
+    for (pthread_t tid: tids) {
         CHECK(pthread_join(tid, NULL), "join error");
     }
-
 
     LOG("All threads joined\n");
 

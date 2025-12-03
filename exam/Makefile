@@ -1,2 +1,2 @@
 bridge.exe: exam.cpp
-	g++ exam.cpp -o bridge.exe
+	g++ exam.cpp -fsanitize=address -o bridge.exe
