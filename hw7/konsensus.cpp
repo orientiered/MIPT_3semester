@@ -7,7 +7,6 @@
 
 const int NPROC = 33;
 const char * const text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
-const
 
 enum ROLE {
     FOLLOWER,
@@ -20,12 +19,14 @@ struct info {
     char my_letter = 0;
     char *cur = nullptr;
     int mymq = 0;
+    int pid;
+
+    std::set<int> mqs;
 
 };
 
 struct init_vals {
     int mq;
-    int mq2;
     int nproc;
     const char *text;
     const size_t text_len;
@@ -34,6 +35,8 @@ struct init_vals {
 enum ACTION {
     HELLO,
     SING,
+    SEND_MQS,
+    REQUEST_MQS,
     TASK_END,
     END,
 };
@@ -41,7 +44,7 @@ enum ACTION {
 struct msg {
     long mtype;
     pid_t sender;
-    int val;
+    long val;
     int action;
 
     int send(int mq, int flg = 0);
@@ -70,119 +73,173 @@ int char2idx(char c) {
 
 const int LEADER_TYPE = 1;
 const int FOLLOWER_TYPE = 2;
+const int MQS_TYPE = 3;
 
+void send_mqs(info& info, int recipient) {
+    msg msg = {MQS_TYPE, info.pid, (long) info.mqs.size(), SEND_MQS};
+    CHECK(msg.send(recipient), "send update len");
+
+    for (int mq: info.mqs) {
+        msg.val = mq;
+        CHECK(msg.send(recipient), "send update");
+    }
+}
+
+void update_mqs(info& info, int loser_mq) {
+    msg msg = {MQS_TYPE, info.pid, info.mymq, REQUEST_MQS};
+    msg.send(loser_mq);
+
+    CHECK(msg.rcv(info.mymq, MQS_TYPE, 0), "rcv update len");
+
+    if (msg.action != SEND_MQS) {
+        LOG("Bad msg action (expected send mqs)\n");
+    }
+
+    for (int idx = msg.val; idx > 0; idx--) {
+        CHECK(msg.rcv(info.mymq, MQS_TYPE, 0), "rcv update");
+        info.mqs.insert(msg.val);
+    }
+
+    PROC_LOG("MQS update success: sz = %ld\n", info.mqs.size());
+
+}
+
+void leader(info& info, init_vals& in);
+void follower(info& info, init_vals& in);
 
 void worker(init_vals in) {
     info info;
+    info.pid = getpid();
 
     info.mymq = msgget(IPC_PRIVATE, IPC_CREAT | 0644);
     CHECK(info.mymq, "msgget 2");
+    PROC_LOG("mymq = %d\n", info.mymq);
 
-    pid_t pid = getpid();
-    std::set<int> mqs = {pid};
+    info.mqs.insert(info.mymq);
+
+
     // choosing leader
-    msg hello = {pid, pid, info.mymq, HELLO};
+    msg hello = {info.pid, info.pid, info.mymq, HELLO};
 
-    // leader is the process with highest mymq
-    int turn = 0;
+    // leader is the process with highest own message queue id
+    // everyone sends his mqid to common queue and receives exactly one message from other process (MSG_EXCEPT)
+    // then
     while (true) {
-        if (mqs.size() == in.nproc) break;
+        // term++;
+        // PROC_LOG("Term %d\n", term);
 
+        if (info.mqs.size() == in.nproc) break;
+
+        // Отправляем в общий канал сообщение со своим id очереди
         CHECK(hello.send(in.mq), "snd");
 
         msg resp;
-        CHECK(resp.rcv(in.mq, pid, MSG_EXCEPT), "rcv");
-
-        if (resp.val > info.mymq) {
-            info.role = FOLLOWER;
-            send_mqs();
-
-
-            break;
-        } else {
-            update_mqs();
+        if (info.mqs.size() - in.nproc <= 2) {
+            PROC_LOG("Send hello message, mqs size = %ld\n", info.mqs.size());
         }
 
-        turn++;
-    }
+        // читаем сообщение с id очереди ДРУГОГО процесса
+        CHECK(resp.rcv(in.mq, info.pid, MSG_EXCEPT), "rcv");
 
+        // Если у полученного сообщений больший id, то мы не можем быть лидером
+        if (resp.val > info.mymq) {
+            PROC_LOG("Removed from leader candidates; mqs size = %zu\n", info.mqs.size());
+            info.role = FOLLOWER;
+            break;
+        } else {
+        // Иначе мы можем быть лидером и нужно обновить набор процессов, с которыми познакомились
+        // Отправляем запрос на обновление процессу, которого мы обогнали
+        // Он точно не лидер, поэтому через какое-то время он станет follower и ответит на запрос
+            update_mqs(info, resp.val);
+        }
+
+    }
 
     if (info.role == CANDIDATE) {
         info.role = LEADER;
-        for (int i = 0; i < in.nproc - 1; i++) {
-            msg resp;
-            resp.rcv(in.mq2, 0, 0);
-            mqs.push_back(resp.val);
-        }
-    }
-    else {
-        msg{pid, pid, info.mymq, HELLO}.send(in.mq2);
     }
 
     // leader
     if (info.role == LEADER) {
-        for (int i = 0; i < in.text_len; i++) {
-            int proc = char2idx(in.text[i]);
-            if (proc < 0) continue;
-
-            if (proc == 0) {
-                // leader sings too
-                printf("%c\n", in.text[i]);
-                continue;
-            }
-
-            // sending char to sing
-            struct msg msg = {LEADER_TYPE, getpid(), in.text[i], SING};
-            CHECK(msg.send(mqs[proc]), "send");
-
-            // receiving confirmation
-            CHECK(msg.rcv(mqs[proc], LEADER_TYPE, MSG_EXCEPT), "rcv");
-            if (msg.action != TASK_END) {
-                PROC_LOG("Wrong confirmation message");
-            }
-        }
-
-        // sending end msg
-        struct msg msg = {LEADER_TYPE, getpid(), 0, END};
-        for (int i = 1; i < mqs.size(); i++) {
-            msg.send(mqs[i]);
-        }
-
+        leader(info, in);
     } else {
-        struct msg msg;
-        while (true) {
-            msg.rcv(info.mymq, FOLLOWER_TYPE, MSG_EXCEPT);
-
-            if (msg.action == END) {
-                break;
-            } else if (msg.action == SING) {
-                // putc(msg.val, stdout);
-                printf("%c\n", msg.val);
-
-                // confirm msg
-                msg = {FOLLOWER_TYPE, getpid(), 0, TASK_END};
-                msg.send(info.mymq);
-            } else {
-                PROC_LOG("Follower: unexpected action %d\n", msg.action);
-            }
-        }
+        follower(info, in);
     }
 
     PROC_LOG("%d finished\n", getpid());
     CHECK(msgctl(info.mymq, IPC_RMID, NULL), "mqueue remove 2");
+
+    exit(0);
 }
 
+void leader(info& info, init_vals& in) {
+    PROC_LOG("Leader found\n");
+    std::vector<int> mqs(info.mqs.begin(), info.mqs.end());
+
+    for (int i = 0; i < in.text_len; i++) {
+        int proc = char2idx(in.text[i]);
+        if (proc < 0) continue;
+
+        if (mqs[proc] == info.mymq) {
+            // leader sings too
+            printf("%c\n", in.text[i]);
+            continue;
+        }
+
+        // sending char to sing
+        struct msg msg = {LEADER_TYPE, info.mymq, in.text[i], SING};
+        // LOG("sending %c to mqs[%d] = %d\n", in.text[i], proc, mqs[proc]);
+        CHECK(msg.send(mqs[proc]), "send");
+
+        // receiving confirmation
+        CHECK(msg.rcv(info.mymq, FOLLOWER_TYPE, 0), "rcv");
+        if (msg.action != TASK_END) {
+            PROC_LOG("Wrong confirmation message");
+        }
+    }
+
+    // sending end msg
+    struct msg msg = {LEADER_TYPE, info.pid, 0, END};
+    for (int i = 0; i < mqs.size(); i++) {
+        msg.send(mqs[i]);
+    }
+
+}
+
+void follower(info& info, init_vals& in) {
+    msg msg;
+    // PROC_LOG("Follower init\n");
+    while (true) {
+        msg.rcv(info.mymq, 0, 0);
+
+        if (msg.action == REQUEST_MQS) {
+            PROC_LOG("mqs request from %ld\n", msg.val);
+            send_mqs(info, msg.val);
+        } else
+        if (msg.action == END) {
+            return;
+        } else if (msg.action == SING) {
+            // putc(msg.val, stdout);
+            printf("%c\n", msg.val);
+
+            // confirm msg
+            int leader = msg.sender;
+            msg = {FOLLOWER_TYPE, getpid(), 0, TASK_END};
+            msg.send(leader);
+        } else {
+            PROC_LOG("Follower: unexpected action %d\n", msg.action);
+        }
+    }
+}
 
 int main(int argc, const char *argv[]) {
 
     int mq = msgget(IPC_PRIVATE, IPC_CREAT | 0644);
     CHECK(mq, "msgget");
-    int mq2 = msgget(IPC_PRIVATE, IPC_CREAT | 0644);
-    CHECK(mq2, "msgget");
 
-    LOG("Spawning processes");
+    LOG("Spawning processes\n");
 
-    init_vals in{mq, mq2, NPROC, text, strlen(text)};
+    init_vals in{mq, NPROC, text, strlen(text)};
 
     for (int i = 0; i < NPROC; i++) {
         SPAWN(worker(in););
@@ -190,7 +247,6 @@ int main(int argc, const char *argv[]) {
 
     wait_for_all();
     CHECK(msgctl(mq,  IPC_RMID, NULL), "mqueue remove");
-    CHECK(msgctl(mq2, IPC_RMID, NULL), "mqueue remove");
 
     return 0;
 }
