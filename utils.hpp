@@ -12,7 +12,7 @@
     do {                            \
         pid_t pid = fork();         \
         CHECK(pid, "Fork error");   \
-        if (pid == 0) { __VA_ARGS__ } \
+        if (pid == 0) { __VA_ARGS__ ; exit(0); } \
     } while(0)
 
 #define CHECK(expr, msg) if ((long long)(expr) < 0) {perror(msg); exit(EXIT_FAILURE); }
@@ -33,6 +33,7 @@
 
 #define COL_RESET "\033[0m"
 #define COL_GREEN "\033[32m"
+#define COL_RED
 #define COL_BLUE  "\033[34m"
 #define COL_CYAN  "\033[36m"
 #define COL_BOLD  "\033[1m"

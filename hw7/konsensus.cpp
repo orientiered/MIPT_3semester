@@ -1,252 +1,218 @@
+#include <iostream>
+#include <sys/msg.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <algorithm>
 #include "../utils.hpp"
-#include <cctype>
-#include <cstring>
-#include <vector>
-#include <set>
-#include "sys/msg.h"
 
-const int NPROC = 33;
-const char * const text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+struct msg_t
+{
+    long       mtype; // kMainMtype to send broadcast to everyone
+    int        from;  // Set by bogatir, to be identified by main, which is needed to create broadcast messages
+    int        value;
 
-enum ROLE {
-    FOLLOWER,
-    CANDIDATE,
-    LEADER
-};
-
-struct info {
-    int role = CANDIDATE;
-    char my_letter = 0;
-    char *cur = nullptr;
-    int mymq = 0;
-    int pid;
-
-    std::set<int> mqs;
+    msg_t ( long mtype_, int from_, int value_) : mtype{ mtype_}, from{ from_}, value{ value_} {}
+    msg_t () : mtype{ 0}, from{ 0}, value{ 0} {}
 
 };
 
-struct init_vals {
-    int mq;
-    int nproc;
-    const char *text;
-    const size_t text_len;
-};
+const size_t kMsgSize     = sizeof( msg_t) - sizeof( msg_t::mtype);
+const long   kMainMtype   = 1;
 
-enum ACTION {
-    HELLO,
-    SING,
-    SEND_MQS,
-    REQUEST_MQS,
-    TASK_END,
-    END,
-};
+const int    gStartSymbol = ' '; // Fist printing symbol
+const int    kLastSymbol  = '~'; // Last printing symbol in 7 bit ascii
+const int    kBogatirsNum = kLastSymbol - gStartSymbol + 1;
 
-struct msg {
-    long mtype;
-    pid_t sender;
-    long val;
-    int action;
+inline long gen_mtype_from_main( int id) { return 3 + id; }
 
-    int send(int mq, int flg = 0);
-    int rcv(int mq, int type, int flg);
-};
+int get_random_nonzero() {
+    srand(time(nullptr) ^ getpid());
 
-const size_t msg_sz = sizeof(msg) - sizeof(long);
+    int val = 0;
+    do {
+        val = rand();
+    } while (val == 0);
 
-int msg::send(int mq, int flg) {
-    return msgsnd(mq, this, msg_sz, flg);
+    return val;
 }
 
-int msg::rcv(int mq, int type, int flg) {
-    return msgrcv(mq, this, msg_sz, type, flg);
-}
-
-
-int char2idx(char c) {
-    if (c == ' ') return 0;
-    if (c == ',') return 1;
-    if (c == '.') return 2;
-    if (isalpha(c)) return 2 + tolower(c) - 'a';
-
-    return -1;
-}
-
-const int LEADER_TYPE = 1;
-const int FOLLOWER_TYPE = 2;
-const int MQS_TYPE = 3;
-
-void send_mqs(info& info, int recipient) {
-    msg msg = {MQS_TYPE, info.pid, (long) info.mqs.size(), SEND_MQS};
-    CHECK(msg.send(recipient), "send update len");
-
-    for (int mq: info.mqs) {
-        msg.val = mq;
-        CHECK(msg.send(recipient), "send update");
-    }
-}
-
-void update_mqs(info& info, int loser_mq) {
-    msg msg = {MQS_TYPE, info.pid, info.mymq, REQUEST_MQS};
-    msg.send(loser_mq);
-
-    CHECK(msg.rcv(info.mymq, MQS_TYPE, 0), "rcv update len");
-
-    if (msg.action != SEND_MQS) {
-        LOG("Bad msg action (expected send mqs)\n");
+bool check_all_unique_sorted(int *values, int len) {
+    for (int i = 1; i < len; i++) {
+        if (values[i-1] == values[i]) return false;
     }
 
-    for (int idx = msg.val; idx > 0; idx--) {
-        CHECK(msg.rcv(info.mymq, MQS_TYPE, 0), "rcv update");
-        info.mqs.insert(msg.val);
-    }
-
-    PROC_LOG("MQS update success: sz = %ld\n", info.mqs.size());
-
+    return true;
 }
 
-void leader(info& info, init_vals& in);
-void follower(info& info, init_vals& in);
+void send_broadcast_request(int msg_id, int main_id, int val) {
+    msg_t msg{ kMainMtype, main_id, val};
+    CHECK(msgsnd( msg_id, &msg, kMsgSize, 0), "msgsnd");
+}
 
-void worker(init_vals in) {
-    info info;
-    info.pid = getpid();
+int receive_from_broadcast(int msg_id, int main_id) {
+    msg_t msg;
 
-    info.mymq = msgget(IPC_PRIVATE, IPC_CREAT | 0644);
-    CHECK(info.mymq, "msgget 2");
-    PROC_LOG("mymq = %d\n", info.mymq);
+    CHECK(msgrcv( msg_id, &msg, kMsgSize, gen_mtype_from_main(main_id), 0), "msgrcv");
+    return msg.value;
+}
 
-    info.mqs.insert(info.mymq);
+int choose_leader(int msg_id, int id, int len) {
+    int myval = 0;
 
+    std::vector<int> values(len);
 
-    // choosing leader
-    msg hello = {info.pid, info.pid, info.mymq, HELLO};
-
-    // leader is the process with highest own message queue id
-    // everyone sends his mqid to common queue and receives exactly one message from other process (MSG_EXCEPT)
-    // then
     while (true) {
-        // term++;
-        // PROC_LOG("Term %d\n", term);
+        // Generate my random value and send it to everybody
+        myval = get_random_nonzero();
 
-        if (info.mqs.size() == in.nproc) break;
 
-        // Отправляем в общий канал сообщение со своим id очереди
-        CHECK(hello.send(in.mq), "snd");
+        send_broadcast_request(msg_id, id, myval);
 
-        msg resp;
-        if (info.mqs.size() - in.nproc <= 2) {
-            PROC_LOG("Send hello message, mqs size = %ld\n", info.mqs.size());
+        // Get all values
+        values[0] = myval;
+        for ( int i = 1; i < len; ++i )
+        {
+            values[i] = receive_from_broadcast(msg_id, id);
         }
 
-        // читаем сообщение с id очереди ДРУГОГО процесса
-        CHECK(resp.rcv(in.mq, info.pid, MSG_EXCEPT), "rcv");
+        // Sort in ascending order
+        std::sort( values.begin(), values.end());
 
-        // Если у полученного сообщений больший id, то мы не можем быть лидером
-        if (resp.val > info.mymq) {
-            PROC_LOG("Removed from leader candidates; mqs size = %zu\n", info.mqs.size());
-            info.role = FOLLOWER;
+        // Check if all numbers are unique
+        if (check_all_unique_sorted(values.data(), len))
             break;
-        } else {
-        // Иначе мы можем быть лидером и нужно обновить набор процессов, с которыми познакомились
-        // Отправляем запрос на обновление процессу, которого мы обогнали
-        // Он точно не лидер, поэтому через какое-то время он станет follower и ответит на запрос
-            update_mqs(info, resp.val);
-        }
+
 
     }
 
-    if (info.role == CANDIDATE) {
-        info.role = LEADER;
-    }
+    // All processes generated unique number
+    int my_id = -1;
+    auto myval_iter = std::find(values.begin(), values.end(), myval);
 
-    // leader
-    if (info.role == LEADER) {
-        leader(info, in);
-    } else {
-        follower(info, in);
-    }
-
-    PROC_LOG("%d finished\n", getpid());
-    CHECK(msgctl(info.mymq, IPC_RMID, NULL), "mqueue remove 2");
-
-    exit(0);
-}
-
-void leader(info& info, init_vals& in) {
-    PROC_LOG("Leader found\n");
-    std::vector<int> mqs(info.mqs.begin(), info.mqs.end());
-
-    for (int i = 0; i < in.text_len; i++) {
-        int proc = char2idx(in.text[i]);
-        if (proc < 0) continue;
-
-        if (mqs[proc] == info.mymq) {
-            // leader sings too
-            printf("%c\n", in.text[i]);
-            continue;
-        }
-
-        // sending char to sing
-        struct msg msg = {LEADER_TYPE, info.mymq, in.text[i], SING};
-        // LOG("sending %c to mqs[%d] = %d\n", in.text[i], proc, mqs[proc]);
-        CHECK(msg.send(mqs[proc]), "send");
-
-        // receiving confirmation
-        CHECK(msg.rcv(info.mymq, FOLLOWER_TYPE, 0), "rcv");
-        if (msg.action != TASK_END) {
-            PROC_LOG("Wrong confirmation message");
-        }
-    }
-
-    // sending end msg
-    struct msg msg = {LEADER_TYPE, info.pid, 0, END};
-    for (int i = 0; i < mqs.size(); i++) {
-        msg.send(mqs[i]);
+    if (myval_iter != values.end()) return myval_iter - values.begin();
+    else {
+        PROC_LOG("Logic error: can't find my id\n");
+        return -1;
     }
 
 }
 
-void follower(info& info, init_vals& in) {
-    msg msg;
-    // PROC_LOG("Follower init\n");
-    while (true) {
-        msg.rcv(info.mymq, 0, 0);
 
-        if (msg.action == REQUEST_MQS) {
-            PROC_LOG("mqs request from %ld\n", msg.val);
-            send_mqs(info, msg.val);
+void leader(int msg_id, int id, const char *string, char symbol) {
+    for ( const char *pos = string; *pos != '\0'; ++pos ) {
+        if ( *pos == symbol )
+        {
+            std::putchar( symbol);
+            std::fflush( stdout);
         } else
-        if (msg.action == END) {
-            return;
-        } else if (msg.action == SING) {
-            // putc(msg.val, stdout);
-            printf("%c\n", msg.val);
+        {
+            // Command to symbol owner
+            send_broadcast_request(msg_id, id, *pos);
 
-            // confirm msg
-            int leader = msg.sender;
-            msg = {FOLLOWER_TYPE, getpid(), 0, TASK_END};
-            msg.send(leader);
-        } else {
-            PROC_LOG("Follower: unexpected action %d\n", msg.action);
+            int response_symbol = receive_from_broadcast(msg_id, id);
+            if (response_symbol != *pos) {
+                PROC_LOG("Unexpected response on symbol\n");
+            }
+        }
+    }
+
+    std::putchar( '\n');
+    std::fflush( stdout);
+
+    // Sending exit message
+    send_broadcast_request(msg_id, id, 0);
+}
+
+void follower(int msg_id, int id, char symbol) {
+    for ( ; ; )
+    {
+        int msg_val = receive_from_broadcast(msg_id, id);
+
+        // exit
+        if ( msg_val  == 0 )
+            break;
+
+        // wrong worker
+        if ( msg_val != symbol )
+            continue;
+
+        std::putchar( symbol);
+        std::fflush( stdout);
+
+        // response after printing symbol
+        send_broadcast_request(msg_id, id, symbol);
+    }
+}
+
+void worker( int         msg_id,
+             int         id,     // Used only to be identified by main functions, which creates broadcast
+             int         workerCnt,
+             const char *string)
+{
+
+    int my_id = choose_leader(msg_id, id, workerCnt);
+    // PROC_LOG("My id = %d\n", my_id);
+
+    int symbol = gStartSymbol + my_id;
+
+    if ( my_id == 0 )
+    {
+        leader(msg_id, id, string, symbol);
+    } else
+    {
+        follower(msg_id, id, symbol);
+    }
+
+    // PROC_LOG("Follower: exiting\n");
+    exit(EXIT_SUCCESS);
+
+}
+
+void broadcast_helper(int msg_id, int workerCnt) {
+    while (true) {
+        msg_t msg;
+        CHECK(msgrcv( msg_id, &msg, kMsgSize, kMainMtype, 0), "msgrcv failed");
+
+        int from = msg.from;
+        msg.from = 0;
+
+        for ( int i = 0; i < workerCnt; ++i )
+        {
+            if ( i == from )
+            {
+                continue;
+            }
+
+            msg.mtype = gen_mtype_from_main( i);
+            CHECK(msgsnd( msg_id, &msg, kMsgSize, 0), "main broadcast msgsnd");
+        }
+        if ( msg.value == 0 )
+        {
+            PROC_LOG("Terminate command\n");
+            break;
         }
     }
 }
 
-int main(int argc, const char *argv[]) {
-
-    int mq = msgget(IPC_PRIVATE, IPC_CREAT | 0644);
-    CHECK(mq, "msgget");
-
-    LOG("Spawning processes\n");
-
-    init_vals in{mq, NPROC, text, strlen(text)};
-
-    for (int i = 0; i < NPROC; i++) {
-        SPAWN(worker(in););
+int main( int argc, const char *argv[]) {
+    if ( argc != 2 ) {
+        std::cerr << "Usage: " << argv[0] << " <string to print>" << std::endl;
+        return EXIT_FAILURE;
     }
 
-    wait_for_all();
-    CHECK(msgctl(mq,  IPC_RMID, NULL), "mqueue remove");
+    int msg_id = msgget( IPC_PRIVATE, IPC_CREAT | IPC_EXCL | 0666);
+    CHECK(msg_id, "Message queue error");
 
-    return 0;
+    for ( int i = 0; i < kBogatirsNum; ++i ) {
+        SPAWN(worker(msg_id, i, kBogatirsNum, argv[1]););
+    }
+
+    broadcast_helper(msg_id, kBogatirsNum);
+
+    PROC_LOG("Waiting for all processes\n");
+    wait_for_all();
+
+    msgctl( msg_id, IPC_RMID, 0);
+
+    return EXIT_SUCCESS;
 }
